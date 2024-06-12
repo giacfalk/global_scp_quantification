@@ -49,14 +49,14 @@ normalize_variable <- function(variable) {
 ##
 
 # positive indicators
-pos_indic <- c("green_blue_infra_share", "ac", "radio_ownership_pctg", "tv_ownership_pctg", "cellphone_ownership_pctg", "computer_ownership_pctg", "multiple_information_means_ownership_pctg", "fridge_ownership_pctg", "primary_education_rate_women", "primary_education_rate_men")
+pos_indic <- c("v15_adapt_knowledge")
 
 # negative indicators
 neg_indic <- setdiff(colnames(cities), pos_indic)
 
 ###
 
-source("script/table_indicators.R")
+# source("scripts/table_indicators.R")
 
 ###
 
@@ -76,20 +76,12 @@ weights$weight <- 1/nrow(weights)
 cities_norm <- cities
 cities_norm$geometry <- NULL
 
-for (i in 1:nrow(weights)){
-cities_norm[,weights$indic[i]] <- ifelse(weights$indic[i] %in% neg_indic, normalize_variable(cities_norm[,weights$indic[i]]), -(normalize_variable(cities_norm[,weights$indic[i]])))
-}
-
 # weight them and calculate index
 
-cities_norm$SCPI <- rowSums(cities_norm * weights[,c(2)], na.rm = T)
+cities_norm$SCPI <- rowSums(cities_norm[,-(c(1, 2, match("P15", colnames(cities_norm))))] * weights[,c(2)], na.rm = T)
   
-cities_norm$SCPI <- normalize_variable(cities_norm$SCPI)
-
 ###
 
-dhs_regions<- read_sf("data_and_sources_dimensions/4_Health/Child mortality/shps/sdr_subnational_data.shp")
-cities_norm$ISO <- dhs_regions$ISO
 cities_norm$GRGN_L1 <- countrycode::countrycode(cities_norm$ISO, 'iso2c', 'region')
 
 ###
@@ -119,16 +111,16 @@ sf::sf_use_s2(F)
 
 cities_norm <- st_set_geometry(cities_norm, cities$geometry)
 
-ggplot()+
+a <- ggplot()+
   theme_void()+
-  geom_sf(data=wrld_simpl_sf, fill="lightgrey", colour="black", lwd=0.25)+
+  # geom_sf(data=wrld_simpl_sf, fill="lightgrey", colour="black", lwd=0.25)+
   geom_sf(data=cities_norm, aes(fill=SCPI), colour="white", lwd=0.1)+
   scale_fill_viridis_c(name="SCPI", direction = 1)+
   theme(legend.position = "bottom", legend.direction = "horizontal", legend.key.width = unit(1, 'cm'),  plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"))+
   xlab("")+
   ylab("")
 
-ggsave("figures/SCPI_map_regions.png", height = 2.25, width = 5, scale=3, bg="white")
+ggsave("figures/SCPI_map_regions.png", a, height = 2.25, width = 5, scale=3, bg="white")
 
 
 ###

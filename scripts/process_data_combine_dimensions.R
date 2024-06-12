@@ -21,11 +21,18 @@ library(writexl)
 library(readxl)
 library(googledrive)
 library(fasterize)
+library(countrycode)
+library(haven)
+library(stringr)
+library(stars)
+library(sp)
+library(automap) 
+
 googledrive::drive_auth(email = "giacomo.falchetta@gmail.com")
 
 ####
 
-# https://docs.google.com/spreadsheets/d/1RCgTnyEbomKqVAiIskorDkkHwzWe9e64RHV-Y0wrg8U/edit#gid=0
+# https://docs.google.com/spreadsheets/d/1RCgTnyEbomKqVAiIskorDkkHwzWe9e64RHV-Y0wrg8U/edit#gid=984566709
 
 ###
 
@@ -34,7 +41,15 @@ cities <- cities %>% group_by(CTR_MN_ISO) %>% slice_max(P15, n = n_largest_citie
 
 write_sf(cities, "cities_selected.shp")
 
-dhs_regions<- read_sf("4_Health/Child mortality/shps/sdr_subnational_data.shp") %>% dplyr::select(geometry, DHSREGEN) %>% write_sf("dhs_regions.shp")
+dhs_regions<- read_sf("4_Health/Child mortality/shps/sdr_subnational_data.shp") %>% dplyr::select(geometry, ISO, DHSREGEN) %>% write_sf("dhs_regions.shp") 
+
+if((countrylist!="all")[1]){
+  
+  dhs_regions <- dhs_regions %>% filter(countrycode(ISO, 'iso2c', 'country.name') %in% countrylist)
+}
+
+countrylist <- countrycode(unique(dhs_regions$ISO), 'iso2c', 'country.name')
+
 regions <- st_as_sf(rworldmap::countriesLow) %>% filter(SOVEREIGNT!="Antarctica")
 
 gridded_pop <- raster("GHS_POP_E2015_GLOBE_R2019A_4326_30ss_V1_0.tif")
@@ -42,10 +57,46 @@ gridded_pop <- raster("GHS_POP_E2015_GLOBE_R2019A_4326_30ss_V1_0.tif")
 ###
 
 if (scale == "cities"){
-  cities <- cities
+  cities <- cities %>% filter(CTR_MN_NM %in% countrylist)
 } else if (scale == "regions"){
-  cities <- dhs_regions
+  cities <- dhs_regions %>% filter(countrycode(ISO, 'iso2c', 'country.name') %in% countrylist)
 }
+
+###
+
+r <- read_dta("F:/.shortcut-targets-by-id/13znqeVDfPULc4J_lQLbyW_Kmfa03o63F/3-Research/Oxford/CoolingPoverty/dhs/Clean Data/DHS_cleaned.dta")
+r <- as.data.frame(r) %>% filter(country %in% countrylist)
+
+r$weights <- r$weights_v <-  r$hv005
+r$CTRY <- countrycode(r$country, 'country.name', 'iso2c')
+r$DHSID <- paste0(r$CTRY, r$year, str_sub(paste0("00000000", r$hv001), start= -8))
+
+###
+
+s <- list.files(pattern=".shp", path="F:/.shortcut-targets-by-id/13znqeVDfPULc4J_lQLbyW_Kmfa03o63F/3-Research/Oxford/CoolingPoverty/dhs/Raw Data", recursive = T, full.names = T)  
+s <- s[!grepl("xml", s)]
+s <- s[grepl(paste0(countrylist, collapse = "|"), s)]
+s <- lapply(s, read_sf)
+s <- bind_rows(s)
+s$CTRY <- s$DHSCC
+
+t <- list.files(pattern=".csv", path="F:/.shortcut-targets-by-id/13znqeVDfPULc4J_lQLbyW_Kmfa03o63F/3-Research/Oxford/CoolingPoverty/dhs/Raw Data", recursive = T, full.names = T)  
+t <- t[grepl(paste0(countrylist, collapse = "|"), t)]
+
+t <- lapply(t, read.csv)
+t <- bind_rows(t)
+t$CTRY <-  t$DHSCC
+t$DHSID <- NULL
+t$DHSYEAR <- NULL
+
+st <- merge(s, t, c("CTRY", "DHSCC", "DHSCLUST"))
+rst <- merge(r, st, by=c("DHSID", "CTRY"))
+
+###
+
+rst <- st_as_sf(rst)
+
+rst <- rst %>% st_transform(3395) %>% st_buffer(10000) %>% st_transform(4326)
 
 ####
 ## 1) Climate
@@ -61,20 +112,24 @@ if(scale=="cities"){fls1 <- fls1  %>% filter(!grepl("regions", name))}
 
 fls1_d <- pblapply(fls1$id, drive_download, overwrite=T)
 fls1_d <- bind_rows(fls1_d)
-fls1_d_1 <- fls1_d[c(grep("max-", fls1$name)),]
+fls1_d_1 <- fls1_d[c(grep("max", fls1$name)),]
 fls1_d_1 <- lapply(fls1_d_1$local_path, terra::rast)
-fls1_d_2 <- fls1_d[c(grep("avg-", fls1$name)),]
+fls1_d_2 <- fls1_d[c(grep("avg", fls1$name)),]
 fls1_d_2 <- lapply(fls1_d_2$local_path, terra::rast)
 
 
 wb_t_max <- if(length(fls1_d_1)>1) {do.call(mosaic, fls1_d_1)} else{fls1_d_1[[1]]}
 wb_t_avg <- if(length(fls1_d_2)>1) {do.call(mosaic, fls1_d_2)} else{fls1_d_2[[1]]}
 
+wb_t_max <- terra::mask(wb_t_max, vect(st_as_sfc(st_bbox(extent(cities)))))
+wb_t_avg <- terra::mask(wb_t_avg, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-gp <- projectRaster(gridded_pop, wb_t_avg[[1]])
+# gp <- projectRaster(gridded_pop, wb_t_max[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$wb_t_max <- exact_extract(tapp(wb_t_max, 1, max), cities, "weighted_mean", weights=gp)
-cities$wb_t_avg <- exact_extract(tapp(wb_t_avg, 1, mean), cities, "weighted_mean", weights=gp)
+rst$wb_t_max <- exact_extract(tapp(wb_t_max, 1, max), rst, "mean")
+rst$wb_t_avg <- exact_extract(tapp(wb_t_avg, 1, mean), rst, "mean")
 
 ###
 
@@ -92,9 +147,13 @@ fls1_b <- lapply(fls1_b$local_path, terra::rast)
 
 wb_t_gt_30_ndays <- if(length(fls1_b)>1) {do.call(mosaic, fls1_b)} else{fls1_b[[1]]}
 
-gp <- projectRaster(gridded_pop, wb_t_gt_30_ndays[[1]])
+wb_t_gt_30_ndays <- terra::mask(wb_t_gt_30_ndays, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$wb_t_gt_30_ndays <- exact_extract(wb_t_gt_30_ndays, cities, "weighted_mean", weights=gp)
+# gp <- projectRaster(gridded_pop, wb_t_gt_30_ndays[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
+
+rst$wb_t_gt_30_ndays <- exact_extract(wb_t_gt_30_ndays, rst, "mean")
 
 ####
 ## 2) Thermal comfort Infrastructures & Assets
@@ -115,9 +174,13 @@ fls2 <- lapply(fls2$local_path, terra::rast)
 
 index_builtup <- if(length(fls2)>1) {do.call(mosaic, fls2)} else{fls2[[1]]}
 
-gp <- projectRaster(gridded_pop, index_builtup[[1]])
+index_builtup <- terra::mask(index_builtup, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$index_builtup <- exact_extract(index_builtup, cities, "weighted_mean", weights=gp)
+# gp <- projectRaster(gridded_pop, index_builtup[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
+
+rst$index_builtup <- exact_extract(index_builtup, rst, "mean")
 
 ####
 # 2.2) Green & Blue  infrastructure
@@ -136,47 +199,30 @@ fls3 <- lapply(fls3$local_path, terra::rast)
 
 green_blue_infra_share <- if(length(fls3)>1) {do.call(mosaic, fls3)} else{fls3[[1]]}
 
-gp <- projectRaster(gridded_pop, green_blue_infra_share[[1]])
+green_blue_infra_share <- terra::mask(green_blue_infra_share, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$green_blue_infra_share <- exact_extract(green_blue_infra_share, cities, "weighted_mean", weights=gp)
+# gp <- projectRaster(gridded_pop, green_blue_infra_share[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
+
+rst$green_blue_infra_share <- exact_extract(green_blue_infra_share, rst, "mean")
 
 ####
 # 2.3) Water quality and Sanitation
-  
+
 water <- raster("2_Thermal comfort Infrastructures & Assets/Water quality and Sanitation/IHME_LMIC_WASH_2000_2017_W_IMP_PERCENT_MEAN_2017_Y2020M06D02.TIF")
 water <- projectRaster(water, raster(wb_t_max))
 values(water) <- ifelse(is.na(values(water)), 100, values(water))
 water <- rgis::mask_raster_to_polygon(water, regions)
+
+###
 
 sanitation <- raster("2_Thermal comfort Infrastructures & Assets/Water quality and Sanitation/IHME_LMIC_WASH_2000_2017_S_IMP_PERCENT_MEAN_2017_Y2020M06D02.TIF")
 sanitation <- projectRaster(sanitation, raster(wb_t_max))
 values(sanitation) <- ifelse(is.na(values(sanitation)), 100, values(sanitation))
 sanitation <- rgis::mask_raster_to_polygon(sanitation, regions)
 
-# 2.4) Housing materials
-
-housing_quality_dhs <- read_sf("2_Thermal comfort Infrastructures & Assets/housing_materials/shps/sdr_subnational_data.shp")
-housing_quality_dhs <- housing_quality_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(HCRMSLH1RM[HCRMSLH1RM!=9999], na.rm=T), .)))
-housing_quality_dhs <- dplyr::select(housing_quality_dhs, 28:49)
-
-# rudimentary floors
-ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")[[6]]
-HCFLRMHRUD <- terra::rasterize(housing_quality_dhs, ac, field="HCFLRMHRUD", fun="mean", background = 100)
-HCFLRMHRUD[is.na(HCFLRMHRUD)] <- 100
-HCFLRMHRUD <- rast(rgis::mask_raster_to_polygon(raster(HCFLRMHRUD), regions))
-
-HCRMSLH1RM <- terra::rasterize(housing_quality_dhs, ac, field="HCRMSLH1RM", fun="mean", background = 100)
-HCRMSLH1RM[is.na(HCRMSLH1RM)] <- 100
-HCRMSLH1RM <- rast(rgis::mask_raster_to_polygon(raster(HCRMSLH1RM), regions))
-
-cities$rudimentary_floor_perc <- exact_extract(HCFLRMHRUD, cities, "mean")
-cities$only_one_sleeping_room_perc <- exact_extract(HCRMSLH1RM, cities, "mean")
-
-# 2.5) Clothing
-
-## ??
-
-# 2.6) Assets
+#######
 
 ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")
 ac_pop <- rast("2_Thermal comfort Infrastructures & Assets/Assets/pop_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")
@@ -184,55 +230,9 @@ ac_pop <- rast("2_Thermal comfort Infrastructures & Assets/Assets/pop_ssp1_ssp2_
 ac <- ac[[6]]
 ac_pop <- ac_pop[[6]]
 
-assets_dhs <- read_sf("2_Thermal comfort Infrastructures & Assets/Assets/sdr_subnational_data_2023-12-06/shps/sdr_subnational_data.shp")
-assets_dhs <- assets_dhs %>% mutate_if(is.numeric, funs(ifelse(.==9999, 0, .)))
+rst$ac <- exact_extract(ac, rst, "weighted_mean", weights=ac_pop)
 
-# radio
-HCHEFFHRDO <- terra::rasterize(assets_dhs, ac, field="HCHEFFHRDO", fun="mean", background = 100)
-HCHEFFHRDO[is.na(HCHEFFHRDO)] <- 100
-HCHEFFHRDO <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHRDO), regions))
-
-# tv
-HCHEFFHTLV <- terra::rasterize(assets_dhs, ac, field="HCHEFFHTLV", fun="mean", background = 100)
-HCHEFFHTLV[is.na(HCHEFFHTLV)] <- 100
-HCHEFFHTLV <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHTLV), regions))
-
-# mobile phone
-HCHEFFHMPH <- terra::rasterize(assets_dhs, ac, field="HCHEFFHMPH", fun="mean", background = 100)
-HCHEFFHMPH[is.na(HCHEFFHMPH)] <- 100
-HCHEFFHMPH <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHMPH), regions))
-
-# computer
-HCHEFFHCMP <- terra::rasterize(assets_dhs, ac, field="HCHEFFHCMP", fun="mean", background = 100)
-HCHEFFHCMP[is.na(HCHEFFHCMP)] <- 100
-HCHEFFHCMP <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHCMP), regions))
-
-# refrigerator
-HCHEFFHFRG <- terra::rasterize(assets_dhs, ac, field="HCHEFFHFRG", fun="mean", background = 100)
-HCHEFFHFRG[is.na(HCHEFFHFRG)] <- 100
-HCHEFFHFRG <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHFRG), regions))
-
-# total number of households
-HCHEFFHNUM <- terra::rasterize(assets_dhs, ac, field="HCHEFFHNUM", fun="mean", background = 100)
-HCHEFFHNUM[is.na(HCHEFFHNUM)] <- 100
-HCHEFFHNUM <- rast(rgis::mask_raster_to_polygon(raster(HCHEFFHNUM), regions))
-
-##
-
-cities$ac <- exact_extract(ac, cities, "weighted_mean", weights=ac_pop)
-
-cities$radio_ownership_pctg <- exact_extract(HCHEFFHRDO, cities, "weighted_mean", weights=HCHEFFHNUM)
-cities$tv_ownership_pctg <- exact_extract(HCHEFFHTLV, cities, "weighted_mean", weights=HCHEFFHNUM)
-cities$cellphone_ownership_pctg <- exact_extract(HCHEFFHMPH, cities, "weighted_mean", weights=HCHEFFHNUM)
-cities$computer_ownership_pctg <- exact_extract(HCHEFFHCMP, cities, "weighted_mean", weights=HCHEFFHNUM)
-
-cities$multiple_information_means_ownership_pctg <- rowMeans(cities[,c("radio_ownership_pctg", "tv_ownership_pctg", "cellphone_ownership_pctg", "computer_ownership_pctg")]  %>% st_set_geometry(NULL), na.rm = T)
-
-cities$fridge_ownership_pctg <- exact_extract(HCHEFFHFRG, cities, "weighted_mean", weights=HCHEFFHNUM)
-
-# 2.7) Energy
-
-ely_prices <- read_xls("2_Thermal comfort Infrastructures & Assets/Energy/global-electricity-per-kwh-pricing-2021.xls")
+ely_prices <- read_xls(paste0(getwd(), "/2_Thermal comfort Infrastructures & Assets/Energy/global-electricity-per-kwh-pricing-2021.xls"))
 ely_prices$avg <- ely_prices$`Average price of 1KW/h (USD)`
 ely_prices$low <- ely_prices$`Cheapest KW/h (USD)`
 ely_prices$high <- ely_prices$`Most expensive KW/h (USD)`
@@ -249,10 +249,10 @@ ely_prices_ineq <- ely_prices_high - ely_prices_low
 
 ###
 
-cities$ely_prices_avg <- exact_extract(ely_prices_avg, cities, "mean")
-cities$ely_prices_high <- exact_extract(ely_prices_high, cities, "mean")
-cities$ely_prices_low <- exact_extract(ely_prices_low, cities, "mean")
-cities$ely_prices_ineq <- exact_extract(ely_prices_ineq, cities, "mean")
+rst$ely_prices_avg <- exact_extract(ely_prices_avg, rst, "mean")
+rst$ely_prices_high <- exact_extract(ely_prices_high, rst, "mean")
+rst$ely_prices_low <- exact_extract(ely_prices_low, rst, "mean")
+rst$ely_prices_ineq <- exact_extract(ely_prices_ineq, rst, "mean")
 
 #
 
@@ -261,22 +261,20 @@ ely_outages$mrv <- NA
 ely_outages$iso3c <- ely_outages$`Country Code`
 
 for(i in 1:nrow(ely_outages)){
-ely_outages$mrv[i] <- ely_outages[i, last(which( as.numeric(!is.na(ely_outages[i,5:67])) == max(max(as.numeric(!is.na(ely_outages[i,5:67])))) )) + 4]
+  ely_outages$mrv[i] <- ely_outages[i, last(which( as.numeric(!is.na(ely_outages[i,5:67])) == max(max(as.numeric(!is.na(ely_outages[i,5:67])))) )) + 4]
 }
 
 ely_outages <- merge(ely_outages, regions, by.y="ISO_A3", by.x="iso3c")
 ely_outages$mrv <- ifelse(is.na(ely_outages$mrv), 0, ely_outages$mrv)
 ely_outages <- terra::rasterize(st_as_sf(ely_outages), ac, field="mrv", fun="mean")
 
-cities$ely_outages <- exact_extract(ely_outages, cities, "mean")
+rst$ely_outages <- exact_extract(ely_outages, rst, "mean")
 
-####
-## 3) Social and thermal inequality
-
-# 3.1) Thermal justice
+###############################
+###############################
 
 fls4 <- drive_find(
-    q = "name contains 'people_70_plus'",
+  q = "name contains 'people_70_plus'",
   q = "modifiedTime > '2023-12-02T12:00:00'", n_max = 1000
 )
 
@@ -289,9 +287,13 @@ fls4 <- lapply(fls4$local_path, terra::rast)
 
 people_70_plus <- if(length(fls4)>1) {do.call(mosaic, fls4)} else{fls4[[1]]}
 
-gp <- projectRaster(gridded_pop, people_70_plus[[1]])
+people_70_plus <- terra::mask(people_70_plus, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$people_70_plus_pctg <- exact_extract(people_70_plus, cities, "weighted_mean", weights=gp)
+# gp <- projectRaster(gridded_pop, people_70_plus[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
+
+rst$people_70_plus_pctg <- exact_extract(people_70_plus, rst, "mean")
 
 ###
 
@@ -309,78 +311,120 @@ fls5 <- lapply(fls5$local_path, terra::rast)
 
 children_less_10yo_share <- if(length(fls5)>1) {do.call(mosaic, fls5)} else{fls5[[1]]}
 
-gp <- projectRaster(gridded_pop, children_less_10yo_share[[1]])
+children_less_10yo_share <- terra::mask(children_less_10yo_share, vect(st_as_sfc(st_bbox(extent(cities)))))
 
-cities$people_10_minus_pctg <- exact_extract(children_less_10yo_share, cities, "weighted_mean", weights=gp)
+# gp <- projectRaster(gridded_pop, children_less_10yo_share[[1]])
+# values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+# gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
 
+rst$people_10_minus_pctg <- exact_extract(children_less_10yo_share, rst, "mean")
 
-####
-## 4) Health
+# 5.2) Working standards + 5.3) Heat adaptation knowledge
 
-# 4.1) Child mortality; Diarrheal diseases; Food poisoning; ELDERLY mortality & morbidity
+r <- read_dta("F:/.shortcut-targets-by-id/13znqeVDfPULc4J_lQLbyW_Kmfa03o63F/3-Research/Oxford/CoolingPoverty/policy/unep_cooling_policies/C Data Library/Clean_Dataset.dta")
+r <- arrange(r, country)
+r$mean_cooling_reg <- rowMeans(r[,c(2:48)], na.rm=T)
+r$country <- countrycode::countrycode(r$country, 'country.name', 'iso2c')
 
-child_mortality_dhs <- read_sf("4_Health/Child mortality/shps/sdr_subnational_data.shp")
-child_mortality_dhs <- child_mortality_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(CMECMRCCMR[CMECMRCCMR!=9999], na.rm=T), .)))
-child_mortality_dhs <- dplyr::select(child_mortality_dhs, 28:38)
+rst <- merge(rst, r %>% dplyr::select(country, mean_cooling_reg), by.x=c("CTRY"), by=c("country"), all.x=T)
 
-ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")[[6]]
-CMECMRCCMR <- terra::rasterize(child_mortality_dhs, ac, field="CMECMRCCMR", fun="mean", background = 0)
-CMECMRCCMR[is.na(CMECMRCCMR)] <- 0
-CMECMRCCMR <- rast(rgis::mask_raster_to_polygon(raster(CMECMRCCMR), regions))
+######################
+# calculate indicators
 
-cities$child_mortality_rate_1_5_yo <- exact_extract(CMECMRCCMR, cities, "mean")
+source(paste0(stub, "scripts/define_calculate_scp_indicators_binary.r"))
 
-# 4.2) Non-Communicable Diseases
+######################
+######################
 
-diarrhea_dhs <- read_sf("4_Health/Diarrheal diseases/shps/sdr_subnational_data.shp")
-diarrhea_dhs <- diarrhea_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(CHDIARCDIA[CHDIARCDIA!=9999], na.rm=T), .)))
+# aggregate indicators 
 
-ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")[[6]]
-CHDIARCDIA <- terra::rasterize(diarrhea_dhs, ac, field="CHDIARCDIA", fun="mean", background = 0)
-CHDIARCDIA[is.na(CHDIARCDIA)] <- 0
-CHDIARCDIA <- rast(rgis::mask_raster_to_polygon(raster(CHDIARCDIA), regions))
+scp_indics <- colnames(rst)[substr(colnames(rst), 1, 1) == "v"]
+  
+rr <- list()
 
-cities$diarrhea_rate_children <- exact_extract(CHDIARCDIA, cities, "mean")
+for (ind in scp_indics){
+  
+  rr[[match(ind, scp_indics)]] <- st_as_sf(rst) %>% group_by(CTRY, ADM1NAME, URBAN_RURA) %>% st_set_geometry(NULL) %>%  dplyr::summarise(ind=weighted.mean(.data[[ind]], weights_v, na.rm=T)) %>% pull(ind)
+  
+}
 
-# 4.3) Adverse birth outcome in pregnant women
+rr <- bind_cols(rr)
+colnames(rr) <- scp_indics
 
-# adverse_birth_outcome_dhs <- read_sf("4_Health/maternal_mortality/shps/")
-# adverse_birth_outcome_dhs <- adverse_birth_outcome_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(CMECMRCCMR[CMECMRCCMR!=9999], na.rm=T), .)))
+rst$geometry <- NULL
+rst <- bind_cols( rst %>% group_by(CTRY, ADM1NAME, URBAN_RURA) %>% dplyr::summarise(weights_v=weighted.mean(weights_v, weights_v, na.rm=T)), rr)
 
-####
-## 5) Education and Work standards
+#
 
-# 5.1) School attendance
+rst <- merge(rst, s, by=c("CTRY", "ADM1NAME", "URBAN_RURA"))
+rst <- dplyr::select(rst, CTRY, ADM1NAME, URBAN_RURA, all_of(scp_indics), geometry)
+rst <- sf::st_as_sf(rst)
 
-school_attendance_dhs <- read_sf("5_ Education and Work standards/school_attendance/sdr_subnational_data_2023-12-06/shps/sdr_subnational_data.shp")
-school_attendance_woman_dhs <- school_attendance_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(EDEDUCWCPR[EDEDUCWCPR!=9999], na.rm=T), .)))
-school_attendance_man_dhs <- school_attendance_dhs %>% group_by(DHSCC, SVYYEAR) %>% mutate_if(is.numeric, funs(ifelse(.==9999, mean(EDEDUCMCPR[EDEDUCMCPR!=9999], na.rm=T), .)))
+dhs_rasters <- list()
+rrfilled_l <- list()
 
-ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")[[6]]
-EDEDUCWCPR <- terra::rasterize(school_attendance_woman_dhs, ac, field="EDEDUCWCPR", fun="mean", background = 0)
-EDEDUCWCPR[is.na(EDEDUCWCPR)] <- 100
-EDEDUCWCPR <- rast(rgis::mask_raster_to_polygon(raster(EDEDUCWCPR), regions))
+for(ind in scp_indics){
+  
+  print(ind)
+  
+  for(country in unique(rst$CTRY)){
+    
+    rstt <- filter(rst, CTRY == country)
+    
+    library(GVI)
+    
+    rrfilled <- sf_to_rast(st_transform(rstt, 3395), ind, dhs_regions %>% filter(ISO==country), raster_res=10000, progress = F, beta=1)
+    
+    rrfilled_l[[country]] <- rrfilled
+    
+  }
+  
+  if(length(unique(rst$CTRY))>1){
+  names(rrfilled_l) <- NULL
+  rrfilled_b <- do.call(mosaic, rrfilled_l)
+  } else{
+    rrfilled_b <- rrfilled_l[[1]]
+    
+  }
+  
+  dhs_rasters[match(ind, scp_indics)] <- rrfilled_b
+  
+  
+}
 
-cities$primary_education_rate_women <- exact_extract(EDEDUCWCPR, cities, "mean")
+names(dhs_rasters) <- scp_indics
 
-###
+for (i in 1:length(dhs_rasters)){
+  
+  dhs_rasters[[i]] <- terra::project(dhs_rasters[[i]], y="epsg:4326")
+  
+}
 
-ac <- rast("2_Thermal comfort Infrastructures & Assets/Assets/ac_penetration_ssp1_ssp2_ssp3_ssp5_2010_2050.nc")[[6]]
-EDEDUCMCPR <- terra::rasterize(school_attendance_woman_dhs, ac, field="EDEDUCMCPR", fun="mean", background = 0)
-EDEDUCMCPR[is.na(EDEDUCMCPR)] <- 100
-EDEDUCMCPR <- rast(rgis::mask_raster_to_polygon(raster(EDEDUCMCPR), regions))
+# plot(dhs_rasters[[5]])
 
-cities$primary_education_rate_men <- exact_extract(EDEDUCMCPR, cities, "mean")
-
-# 5.2) Working standards
-
-# 5.3) Heat adaptation knowledge
+writeRaster(rast(dhs_rasters), paste0(stub,"results/rasters_indicators.tif"), overwrite=T)
 
 ######################
 
 # ancillary data
 
-if(scale=="regions"){cities$P15 <- exact_extract(gridded_pop, cities, "sum") }
+cities <- dhs_regions
+
+cities$P15 <- exact_extract(gridded_pop, cities, "sum") 
+
+gp <- projectRaster(gridded_pop, dhs_rasters[[1]])
+values(gp) <- ifelse(is.na(values(gp)), 0, values(gp))
+gp <-  terra::mask(rast(gp), vect(st_as_sfc(st_bbox(extent(cities)))))
+
+for(i in scp_indics){
+  
+  cities[,i] <- exact_extract(dhs_rasters[[i]], cities, "weighted_mean", weights=gp)
+  
+}
+
+# plot(cities["v9_justice"])
+
+write_rds(cities, paste0(stub,"results/provincial_indicators.rds"))
 
 ######################
 ######################
