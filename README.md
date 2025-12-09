@@ -1,4 +1,5 @@
-**Global Systemic Cooling Poverty quantification**
+**Systemic Cooling Poverty**
+
 Replication code for the paper “Systemic Cooling Poverty across World Countries” by Falchetta, Giacomo, Antonella Mazzone, Shikha Bhasin, Marinella Davide, Paula Bezerra, Kristian Fabbri, Gaia Bertarelli, Anna Pistorio, Ilaria Dal Barco, and Enrica De Cian. 2025. Manuscript under review at Nature Sustainability.
 
 ## Overview
