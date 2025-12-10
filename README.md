@@ -70,7 +70,9 @@ The workflow covers 28 countries (≈1.15M households), integrating DHS surveys,
 
 ## Data Requirements
 
-Input datasets are retrivable from Zenodo at XXX. Sources (detailed in the manuscript) include:  
+Input datasets are retrivable from Zenodo at 10.5281/zenodo.17878396. 
+
+Sources (detailed in the manuscript) include:  
 - DHS Household / Women / Men Recode datasets  
 - ERA5-Land (1980–2020) wet-bulb temperature  
 - Local Climate Zones  
